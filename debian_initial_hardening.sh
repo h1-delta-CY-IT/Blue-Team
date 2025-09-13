@@ -1,8 +1,9 @@
 #!/bin/bash
 # -----------------------------
-# Dynamic Super Hardening Script for Blue Team CTFs
+# Dynamic Super Hardening Script for Blue Team CTFs 
 # Author: Adapted from Ardian Peach + enhancements
 # Last Updated: 2025-09-12
+# Debian Vers.
 # -----------------------------
 
 # -----------------------------
