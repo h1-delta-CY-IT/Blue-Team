@@ -2,7 +2,7 @@
 Bash Scripts and Python Files used for blue teaming
 
 -------------------
-# Service_Harden.sh
+# service_harden.sh
 Kill undesired services and processes. Modify via indicators.txt keep.txt and hashes.txt to tailor to needs.
 -------------------
 
@@ -33,7 +33,7 @@ systemd
 -----
 
 -------------------
-#initial_hardening.sh
+# initial_hardening.sh
 -------------------
 Tailored to debian and fedora individually. Harden your service immediately by killing low-hanging fruits.
 
