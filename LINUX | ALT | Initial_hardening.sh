@@ -229,7 +229,7 @@ esac
 # -----------------------------
 # Service hardening (common)
 # -----------------------------
-SERVICE_HARDEN_SCRIPT="./service_harden.sh"
+SERVICE_HARDEN_SCRIPT="./suspicious_harden.sh"
 if [[ -f "$SERVICE_HARDEN_SCRIPT" ]]; then
     echo "[*] Running service hardening script..."
     chmod +x "$SERVICE_HARDEN_SCRIPT"
