@@ -1,80 +1,102 @@
 #!/usr/bin/env bash
-# Hardening script for AlmaLinux 9 (RHEL9 family)
-# - Idempotent: safe to run multiple times
-# - Preserves SSH access for users 'jmoney' and 'plinktern' (do NOT change those credentials here)
-# Run as root: sudo bash hardening-alma9.sh
+# Hardening script for AlmaLinux 9 (RHEL-family) and Debian/Ubuntu
+# Run as root: sudo bash hardening-linux.sh
+# Logs to /var/log/hardening_linux.log
 
 set -euo pipefail
-LOG=/var/log/hardening_alma9.log
+LOG=/var/log/hardening_linux.log
 exec > >(tee -a "$LOG") 2>&1
 
 echo "=== START hardening: $(date) ==="
 
-# 1) Basic update + install required packages
-echo "[+] Updating system and installing packages..."
-dnf -y update
-dnf -y install firewalld fail2ban audit policycoreutils-python-utils passwdqc yum-utils
-
-# 2) Ensure SELinux is enforcing (write config + setenforce)
-echo "[+] Ensuring SELinux is enforcing..."
-if [ -f /etc/selinux/config ]; then
-  sed -i 's/^SELINUX=.*/SELINUX=enforcing/' /etc/selinux/config
+# Detect OS family
+if [ -f /etc/os-release ]; then
+  . /etc/os-release
+  OS=$ID
+  OS_FAMILY=$ID_LIKE
+else
+  echo "Cannot detect OS, aborting."
+  exit 1
 fi
-setenforce 1 || true
 
-# 3) Firewalld: enable, set default zone, allow only necessary services (SSH + HTTP)
-echo "[+] Configuring firewalld..."
-systemctl enable --now firewalld
-# Set default zone to public (conservative) and remove direct rules
-firewall-cmd --set-default-zone=public
+echo "[+] Detected OS: $PRETTY_NAME"
 
-# Allow essential services required by the competition
-# SSH must be reachable for jmoney/plinktern (score checks), HTTP for WooCommerce on storkfront.
-firewall-cmd --permanent --zone=public --add-service=ssh
-firewall-cmd --permanent --zone=public --add-service=http
-# If HTTPS exists in your environment, consider enabling https
-# firewall-cmd --permanent --zone=public --add-service=https
+# Define package manager commands
+if [[ "$OS" =~ (almalinux|rhel|centos|rocky) || "$OS_FAMILY" =~ rhel ]]; then
+  PKG_UPDATE="dnf -y update"
+  PKG_INSTALL="dnf -y install"
+  FIREWALL_CMD="firewall-cmd"
+  USE_FIREWALLD=1
+elif [[ "$OS" =~ (debian|ubuntu) || "$OS_FAMILY" =~ debian ]]; then
+  PKG_UPDATE="apt-get update -y && apt-get upgrade -y"
+  PKG_INSTALL="apt-get install -y"
+  FIREWALL_CMD="ufw"
+  USE_FIREWALLD=0
+else
+  echo "Unsupported OS family: $OS $OS_FAMILY"
+  exit 1
+fi
 
-# Tighten default inbound policy: drop other incoming
-# firewalld default is to reject/allow by zone; ensure no broad open ports:
-firewall-cmd --permanent --zone=public --remove-service=mdns || true
+# 1) Update system
+echo "[+] Updating system..."
+eval $PKG_UPDATE
 
-firewall-cmd --reload
-firewall-cmd --list-all
+# 2) Install baseline packages
+echo "[+] Installing packages..."
+if [ $USE_FIREWALLD -eq 1 ]; then
+  eval $PKG_INSTALL firewalld fail2ban audit policycoreutils-python-utils passwdqc
+else
+  eval $PKG_INSTALL ufw fail2ban auditd libpam-pwquality
+fi
 
-# 4) SSH hardening - use sshd_config.d to avoid upstream overrides
-# We intentionally keep PasswordAuthentication yes because competition may require password logins
-# but we severely limit which users may log in.
-echo "[+] Hardening SSH (sshd)..."
+# 3) SELinux (Alma only)
+if [ $USE_FIREWALLD -eq 1 ]; then
+  echo "[+] Ensuring SELinux enforcing..."
+  sed -i 's/^SELINUX=.*/SELINUX=enforcing/' /etc/selinux/config
+  setenforce 1 || true
+fi
+
+# 4) Firewall configuration
+echo "[+] Configuring firewall..."
+if [ $USE_FIREWALLD -eq 1 ]; then
+  systemctl enable --now firewalld
+  $FIREWALL_CMD --set-default-zone=public
+  $FIREWALL_CMD --permanent --zone=public --add-service=ssh
+  $FIREWALL_CMD --permanent --zone=public --add-service=http
+  $FIREWALL_CMD --reload
+else
+  ufw --force enable
+  ufw allow ssh
+  ufw allow http
+  # optionally allow https if needed
+fi
+
+# 5) SSH hardening
+echo "[+] Hardening SSH..."
 SSH_DROPIN=/etc/ssh/sshd_config.d/00-hardening.conf
+mkdir -p /etc/ssh/sshd_config.d
 cat > "$SSH_DROPIN" <<'EOF'
-# Hardening drop-in for sshd
 PermitRootLogin no
-# Keep PasswordAuthentication yes for competition scoring users; restrict logins to specific users
-# IMPORTANT: do NOT remove jmoney or plinktern here if these accounts are used by score checks.
 PasswordAuthentication yes
 ChallengeResponseAuthentication no
 UsePAM yes
 X11Forwarding no
 AllowTcpForwarding no
-# Restrict SSH to only the accounts necessary for scoring + admin
 AllowUsers jmoney plinktern
-# Connection limits
 MaxAuthTries 3
 MaxSessions 2
 LoginGraceTime 30
 ClientAliveInterval 300
 ClientAliveCountMax 2
-# Banner (optional)
-Banner /etc/issue.net
 EOF
 
-# reload sshd
-systemctl reload sshd
+systemctl reload ssh || systemctl restart sshd
 
-# 5) Fail2ban: basic protection for ssh
+# 6) Fail2ban
 echo "[+] Configuring fail2ban..."
-cat > /etc/fail2ban/jail.d/defaults.conf <<'EOF'
+JAILCONF=/etc/fail2ban/jail.d/defaults.conf
+mkdir -p /etc/fail2ban/jail.d
+cat > "$JAILCONF" <<'EOF'
 [sshd]
 enabled = true
 port = ssh
@@ -85,70 +107,57 @@ findtime = 600
 EOF
 systemctl enable --now fail2ban
 
-# 6) Auditd - enable and add core rules
-echo "[+] Enabling auditd and core audit rules..."
-systemctl enable --now auditd
+# 7) Auditd
+echo "[+] Configuring auditd..."
+if [ $USE_FIREWALLD -eq 1 ]; then
+  systemctl enable --now auditd
+else
+  systemctl enable --now auditd || true
+fi
 
 AUDIT_RULES=/etc/audit/rules.d/hardening.rules
 cat > "$AUDIT_RULES" <<'EOF'
-# Basic audit rules
--D
--b 8192
-# Audit config file changes
 -w /etc/passwd -p wa -k identity
 -w /etc/shadow -p wa -k identity
 -w /etc/group -p wa -k identity
 -w /etc/ssh/sshd_config -p wa -k ssh_config
 -w /etc/sudoers -p wa -k scope
-# Monitor /var/www (web content)
 -w /var/www -p wa -k web-content
-# Monitor systemd unit changes
--w /etc/systemd/system -p wa -k systemd
 EOF
 
-augenrules --load || true
+if command -v augenrules >/dev/null; then
+  augenrules --load || true
+fi
 
-# 7) Kernel hardening via sysctl (apply runtime + persist)
+# 8) Sysctl hardening
 echo "[+] Applying sysctl hardening..."
 SYSCTL_CONF=/etc/sysctl.d/99-hardening.conf
 cat > "$SYSCTL_CONF" <<'EOF'
-# Network / kernel hardening
 net.ipv4.ip_forward = 0
 net.ipv6.conf.all.forwarding = 0
 net.ipv4.conf.all.rp_filter = 1
-net.ipv4.conf.default.rp_filter = 1
 net.ipv4.tcp_syncookies = 1
 net.ipv4.conf.all.accept_source_route = 0
-net.ipv4.conf.default.accept_source_route = 0
-# Reduce ICMP exposure
-net.ipv4.icmp_echo_ignore_broadcasts = 1
-# Ignore bogus ICMP redirects
-net.ipv4.conf.all.accept_redirects = 0
 net.ipv6.conf.all.accept_redirects = 0
-# Enable ASLR (usually enabled by default)
 kernel.randomize_va_space = 2
 EOF
-
 sysctl --system
 
-# 8) File permissions & world-writable dir checks (report & fix common issues)
-echo "[+] Checking and tightening common world-writable dirs..."
-# find world-writable directories (excluding /proc and /sys)
+# 9) File permissions
+echo "[+] Fixing world-writable dirs..."
 for d in $(df --local -P | awk 'NR>1 {print $6}'); do
   find "$d" -xdev -type d -perm -0002 -print | while read -r wdir; do
-    # skip /tmp (we'll set sticky bit)
-    if [ "$wdir" = "/tmp" ] || echo "$wdir" | grep -q "^/tmp"; then
+    if [[ "$wdir" == /tmp* ]]; then
       chmod 1777 "$wdir" || true
     else
-      echo "Fixing perms for $wdir"
       chmod o-w "$wdir" || true
     fi
   done
 done
 
-# 9) Disable unused filesystems (best-effort; do not break system)
-echo "[+] Disabling uncommon kernel modules to reduce attack surface..."
-cat > /etc/modprobe.d/disable-extra-mods.conf <<'EOF'
+# 10) Disable uncommon filesystems (Alma only)
+if [ $USE_FIREWALLD -eq 1 ]; then
+  cat > /etc/modprobe.d/disable-extra-mods.conf <<'EOF'
 install cramfs /bin/true
 install freevxfs /bin/true
 install jffs2 /bin/true
@@ -157,32 +166,20 @@ install hfsplus /bin/true
 install squashfs /bin/true
 install udf /bin/true
 EOF
+fi
 
-# 10) Configure sudo timeout & wheel group only
-echo "[+] Tightening sudoers..."
-# ensure only wheel can sudo and set timestamp_timeout = 5
+# 11) Sudoers tweaks
+echo "[+] Configuring sudoers..."
 if ! grep -q '^%wheel' /etc/sudoers; then
   echo "%wheel ALL=(ALL) ALL" >> /etc/sudoers
 fi
-if ! grep -q '^Defaults\s\+timestamp_timeout=' /etc/sudoers; then
-  echo "Defaults    timestamp_timeout=5" >> /etc/sudoers
+if ! grep -q 'timestamp_timeout' /etc/sudoers; then
+  echo "Defaults timestamp_timeout=5" >> /etc/sudoers
 fi
 
-# 11) Ensure cron jobs owned by root and no world-writable cron dirs
-echo "[+] Verifying cron directories..."
+# 12) Cron permissions
+echo "[+] Hardening cron dirs..."
 chmod -R go-w /etc/cron.* /var/spool/cron || true
-chown root:root /etc/cron.hourly /etc/cron.daily /etc/cron.weekly /etc/cron.monthly || true
+chown root:root /etc/cron.* || true
 
-# 12) Ensure rsyslog/journald retention sensible (do not logrotate too rarely)
-echo "[+] Ensuring journald/rsyslog rotate/retention defaults..."
-# Keep default; optionally tune /etc/systemd/journald.conf/max_retention_sec etc.
-
-# 13) Final: restart services to ensure new configs active
-echo "[+] Restarting services where necessary..."
-systemctl restart sshd || true
-systemctl restart firewalld || true
-systemctl restart auditd || true
-systemctl restart fail2ban || true
-
-echo "=== HARDENING COMPLETE: $(date) ==="
-echo "Log written to $LOG"
+echo "=== HARDENING COMPLETE $(date) ==="
