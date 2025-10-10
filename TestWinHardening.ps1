@@ -3,7 +3,7 @@
 Integrated dynamic Windows hardening script with deterministic password reset and script integrity verification.
 .DESCRIPTION
 - Two scenarios: RDP+FTP or RDP+SQL.
-- Blocks all inbound ports except the chosen allowed ports (creates allow rules BEFORE switching defaults).
+- Firewall/port hardening is now handled separately; this script skips blocking/allowing ports.
 - Ensures Firewall + Defender run, updates Defender signatures.
 - SMB disable/remove is interactive; destructive actions require explicit typed confirmation "YES".
 - Deterministic password reset using an admin-supplied master secret (stateless derivation).
@@ -156,7 +156,7 @@ function Confirm-Remote-Run {
     $isRdp = $false 
     if ($env:SESSIONNAME -and $env:SESSIONNAME -like "RDP-Tcp*") { $isRdp = $true } 
     if ($isRdp) { 
-        Write-Warning "Detected an RDP session. Changing firewall defaults may lock you out." 
+        Write-Warning "Detected an RDP session. Changing system settings may lock you out." 
         $confirm = Read-Host "Type EXACTLY 'YES' to proceed despite remote-session risk (anything else aborts)" 
         if ($confirm -ne "YES") { Log "User aborted due to remote-session safety check." "ERROR"; throw "Aborted by user." } 
     } 
@@ -222,27 +222,17 @@ try {
 # ... Harden-TaskScheduler code unchanged ...
 
 # ----------------------------
-# --- BEGIN INTEGRATED REGISTRY HARDENING MODULE ---
+# Registry hardening module
 # ----------------------------
 # Copy the entire registry hardening module you provided here, including:
 # Backup-RegistryKeys, Harden-RegistryKeyACL, Restore-RegistryACLsFromBackup,
 # Perform-Registry-Hardening, and interactive invocation at the end.
 # Ensure $BackupDir is used for registry backup output.
 
-# Insert the full registry hardening module here
-# ----------------------------
-# --- END INTEGRATED REGISTRY HARDENING MODULE ---
-# ----------------------------
-
 # ----------------------------
 # Scenario selection (RDP+FTP or RDP+SQL)
 # ----------------------------
 # ... existing scenario selection code unchanged ...
-
-# ----------------------------
-# Firewall: allow rules + block inbound default
-# ----------------------------
-# ... existing firewall rules code unchanged ...
 
 # ----------------------------
 # SMB handling (interactive)
