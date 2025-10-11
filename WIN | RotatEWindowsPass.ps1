@@ -8,9 +8,6 @@ $PasswordPool = @(
     'B3sTfR1EnD()fD3lt4#',
     'FuC&R3DT3Am#',
     'Tr7T1hF0rSI$E',
-    'G0O)(LuC4#Bu7',
-    'N0tT()dAy1!.&',
-    'N1cEtR7)(>:#D#'
 )
 
 try {
