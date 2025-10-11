@@ -1,10 +1,6 @@
 # --- Allow RDP
 New-NetFirewallRule -DisplayName "Allow RDP 3389" -Direction Inbound -Protocol TCP -LocalPort 3389 -Action Allow
 
-# --- Allow Web traffic (for browsers)
-New-NetFirewallRule -DisplayName "Allow HTTP 80" -Direction Inbound -Protocol TCP -LocalPort 80 -Action Allow
-New-NetFirewallRule -DisplayName "Allow HTTPS 443" -Direction Inbound -Protocol TCP -LocalPort 443 -Action Allow
-
 # --- Allow MySQL
 New-NetFirewallRule -DisplayName "Allow MySQL 3306" -Direction Inbound -Protocol TCP -LocalPort 3306 -Action Allow
 
