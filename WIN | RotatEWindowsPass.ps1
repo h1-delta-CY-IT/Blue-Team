@@ -1,5 +1,5 @@
 param(
-    [string]$AdminUser = 'Administrator'  # local admin username
+    [string]$AdminUser = 'plinktern'  # local admin username
 )
 
 # --- Password pool 
