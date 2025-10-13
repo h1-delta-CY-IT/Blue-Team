@@ -397,50 +397,108 @@ Perform-Registry-Hardening -TargetKeys $regKeysToHarden -OutDir $BackupDir
 # ----------------------------
 # Scenario selection (RDP+FTP or RDP+SQL)
 # ----------------------------
-function Select-Scenario {
-    $choice = Read-Host "Select scenario to apply (1) RDP+FTP, (2) RDP+SQL, or press Enter to skip (1/2/skip)"
-    switch ($choice) {
-        "1" {
-            Log "Scenario selected: RDP + FTP"
-            # Ensure RDP enabled: set registry & firewall is left external per design
-            try {
-                Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0 -ErrorAction Stop
-                Log "Enabled Remote Desktop (fDenyTSConnections=0)"
-            } catch { Log ("Failed to enable RDP: {0}" -f $_) "WARN" }
-            # Attempt to ensure FTP service presence
-            if (Get-Service -Name FTPSVC -ErrorAction SilentlyContinue) {
-                Set-Service -Name FTPSVC -StartupType Automatic -ErrorAction SilentlyContinue
-                Start-Service -Name FTPSVC -ErrorAction SilentlyContinue
-                Log "FTPSVC service started (IIS FTP)."
-            } else {
-                Log "FTPSVC service not found; IIS FTP not installed or named differently." "WARN"
-            }
-        }
-        "2" {
-            Log "Scenario selected: RDP + SQL"
-            try {
-                Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0 -ErrorAction Stop
-                Log "Enabled Remote Desktop (fDenyTSConnections=0)"
-            } catch { Log ("Failed to enable RDP: {0}" -f $_) "WARN" }
-            # Try to find common SQL Server service names
-            $sqlServices = @("MSSQLSERVER","MSSQL$SQLEXPRESS")
-            $found = $false
-            foreach ($s in $sqlServices) {
-                if (Get-Service -Name $s -ErrorAction SilentlyContinue) {
-                    Set-Service -Name $s -StartupType Automatic -ErrorAction SilentlyContinue
-                    Start-Service -Name $s -ErrorAction SilentlyContinue
-                    Log ("Ensured SQL service {0} is running." -f $s)
-                    $found = $true
-                }
-            }
-            if (-not $found) { Log "No common SQL Server service found. If SQL is installed under a different instance name, please start/configure it manually." "WARN" }
-        }
-        default {
-            Log "No scenario chosen; skipping scenario-specific items."
+function# ----------------------------
+# Dynamic service discovery & user selection
+# ----------------------------
+function Manage-PublicServices {
+    Log "Scanning for potentially public-facing services..."
+
+    # Heuristic list of public-service patterns
+    $publicPatterns = @(
+        "FTP", "FTPSVC", "Web", "HTTP", "IIS", "W3SVC", "SQL", "MSSQL", "MySQL", 
+        "PostgreSQL", "WinRM", "Remote", "RDP", "SMB", "SSH", "Telnet", "Mail", "SMTP"
+    )
+
+    # Collect all running or installable services that might be public-facing
+    try {
+        $allServices = Get-Service | Where-Object {
+            $n = $_.Name.ToUpper()
+            $d = $_.DisplayName.ToUpper()
+            ($publicPatterns | Where-Object { $n -like "*$_*" -or $d -like "*$_*" }).Count -gt 0
+        } | Sort-Object Name
+    } catch {
+        Log "Failed to query services normally. Attempting WMI fallback..."
+        $allServices = Get-CimInstance Win32_Service | Where-Object {
+            $n = $_.Name.ToUpper()
+            $d = $_.DisplayName.ToUpper()
+            ($publicPatterns | Where-Object { $n -like "*$_*" -or $d -like "*$_*" }).Count -gt 0
+        } | Sort-Object Name
+    }
+
+    if (-not $allServices -or $allServices.Count -eq 0) {
+        Log "No public-facing services detected. Skipping service selection."
+        return
+    }
+
+    Write-Host ""
+    Write-Host "The following potentially public-facing services were detected:" -ForegroundColor Cyan
+    $i = 1
+    foreach ($svc in $allServices) {
+        Write-Host ("[{0}] {1} ({2}) - Status: {3}" -f $i, $svc.DisplayName, $svc.Name, $svc.Status)
+        $i++
+    }
+
+    Write-Host ""
+    $selection = Read-Host "Enter the numbers of the services you want to KEEP RUNNING (comma-separated, or press Enter for none)"
+    if (-not $selection) {
+        Log "No services selected to keep running. All detected public services will be disabled."
+        $toDisable = $allServices
+    } else {
+        $indices = $selection -split "[,; ]+" | ForEach-Object { [int]$_ } | Where-Object { $_ -ge 1 -and $_ -le $allServices.Count }
+        $keep = $allServices[$indices]
+        $toDisable = $allServices | Where-Object { $keep -notcontains $_ }
+        Log ("User chose to keep: {0}" -f (($keep | ForEach-Object { $_.Name }) -join ", "))
+    }
+
+    # Ensure RDP is enabled by default if not already
+    try {
+        Log "Ensuring RDP access enabled..."
+        Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" `
+                         -Name "fDenyTSConnections" -Value 0 -ErrorAction SilentlyContinue
+    } catch {
+        Log "Failed to modify RDP setting; RDP enablement skipped." "WARN"
+    }
+
+    # Start and ensure kept services
+    foreach ($svc in $allServices) {
+        if ($toDisable -contains $svc) { continue }
+        try {
+            Set-Service -Name $svc.Name -StartupType Automatic -ErrorAction SilentlyContinue
+            Start-Service -Name $svc.Name -ErrorAction SilentlyContinue
+            Log ("Ensured {0} is running." -f $svc.Name)
+        } catch {
+            Log ("Failed to start service {0}: {1}" -f $svc.Name, $_) "WARN"
         }
     }
+
+    # Disable unneeded public services
+    if ($toDisable.Count -gt 0) {
+        Write-Host ""
+        Write-Host "The following services will be DISABLED:" -ForegroundColor Yellow
+        foreach ($svc in $toDisable) {
+            Write-Host (" - {0} ({1})" -f $svc.DisplayName, $svc.Name)
+        }
+        $confirm = Read-Host "Type EXACTLY 'YES' to disable these services"
+        if ($confirm -eq "YES") {
+            foreach ($svc in $toDisable) {
+                try {
+                    Stop-Service -Name $svc.Name -Force -ErrorAction SilentlyContinue
+                    Set-Service -Name $svc.Name -StartupType Disabled -ErrorAction SilentlyContinue
+                    Log ("Disabled service {0}" -f $svc.Name)
+                } catch {
+                    Log ("Failed to disable service {0}: {1}" -f $svc.Name, $_) "WARN"
+                }
+            }
+        } else {
+            Log "User skipped service disable confirmation."
+        }
+    }
+
+    Log "Public service management phase complete."
 }
-Select-Scenario
+
+# Replace old scenario function with this one
+Manage-PublicServices
 
 # ----------------------------
 # SMB handling (interactive)
