@@ -1,89 +1,89 @@
-Write-Host "=== Non-Windows Autorun Entries and Tasks ===" -ForegroundColor Cyan
+Write-Host "=== Checking for File Explorer Triggers ===" -ForegroundColor Cyan
 
-$autoruns = @()
+# --- Autorun entries that mention explorer.exe ---
 $regPaths = @(
     "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run",
     "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 )
 
+$found = @()
+
 foreach ($path in $regPaths) {
     if (Test-Path $path) {
         Get-ItemProperty $path | ForEach-Object {
-            $_.PSObject.Properties | Where-Object { $_.Name -notmatch "PSPath|PSParentPath|PSChildName|PSDrive|PSProvider" } | ForEach-Object {
-                $exe = ($_.Value -split '\s+')[0]
-                if ($exe -and (Test-Path $exe)) {
-                    $file = Get-Item $exe -ErrorAction SilentlyContinue
-                    $sig = Get-AuthenticodeSignature $exe -ErrorAction SilentlyContinue
-                    if ($sig.SignerCertificate.Subject -notmatch "Microsoft" -and $sig.SignerCertificate.Subject -notmatch "Windows") {
-                        $info = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($exe)
-                        $autoruns += [PSCustomObject]@{
-                            Type = "Registry Run"
-                            Name = $_.Name
-                            Command = $_.Value
-                            Description = if ($info.FileDescription) { $info.FileDescription } else { "N/A" }
-                            Publisher = if ($info.CompanyName) { $info.CompanyName } else { "Unknown" }
-                            Path = $exe
-                        }
-                    }
+            $_.PSObject.Properties |
+            Where-Object { $_.Value -match "explorer.exe" -and $_.Name -notmatch "PS" } |
+            ForEach-Object {
+                $found += [PSCustomObject]@{
+                    Source  = "Registry Run"
+                    KeyPath = $path
+                    Name    = $_.Name
+                    Command = $_.Value
                 }
             }
         }
     }
 }
 
-$tasks = Get-ScheduledTask | Where-Object { $_.Actions.Execute -match ".exe|.bat|.cmd|.vbs|.ps1" } | ForEach-Object {
-    $exe = $_.Actions.Execute
-    if (Test-Path $exe) {
-        $sig = Get-AuthenticodeSignature $exe -ErrorAction SilentlyContinue
-        if ($sig.SignerCertificate.Subject -notmatch "Microsoft" -and $sig.SignerCertificate.Subject -notmatch "Windows") {
-            $info = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($exe)
-            [PSCustomObject]@{
-                Type = "Scheduled Task"
-                Name = $_.TaskName
-                Command = "$exe $($_.Actions.Arguments)"
-                Description = if ($info.FileDescription) { $info.FileDescription } else { "N/A" }
-                Publisher = if ($info.CompanyName) { $info.CompanyName } else { "Unknown" }
-                Path = $exe
+# --- Startup folders ---
+$startupFolders = @(
+    "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Startup",
+    "$env:AppData\Microsoft\Windows\Start Menu\Programs\Startup"
+)
+foreach ($folder in $startupFolders) {
+    if (Test-Path $folder) {
+        Get-ChildItem $folder -Recurse -ErrorAction SilentlyContinue | 
+        Where-Object { $_.FullName -match "explorer.exe" } | 
+        ForEach-Object {
+            $found += [PSCustomObject]@{
+                Source  = "Startup Folder"
+                KeyPath = $folder
+                Name    = $_.Name
+                Command = $_.FullName
             }
         }
     }
 }
 
-$autoruns += $tasks
-if ($autoruns.Count -eq 0) {
-    Write-Host "No non-Windows autorun entries or executable tasks found." -ForegroundColor Yellow
-    exit
-}
-
-$index = 1
-$autoruns | ForEach-Object {
-    Write-Host "`n[$index]" -ForegroundColor Green
-    Write-Host "Type:        $($_.Type)"
-    Write-Host "Name:        $($_.Name)"
-    Write-Host "Publisher:   $($_.Publisher)"
-    Write-Host "Description: $($_.Description)"
-    Write-Host "Command:     $($_.Command)"
-    Write-Host "Path:        $($_.Path)"
-    $index++
-}
-
-$choice = Read-Host "`nEnter numbers (comma-separated) of entries to attempt to kill their processes, or press Enter to skip"
-if (![string]::IsNullOrWhiteSpace($choice)) {
-    $nums = $choice -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^\d+$' }
-    foreach ($num in $nums) {
-        $entry = $autoruns[$num - 1]
-        if ($entry) {
-            Write-Host "Attempting to find and kill process: $($entry.Name)" -ForegroundColor Yellow
-            $procName = [System.IO.Path]::GetFileNameWithoutExtension(($entry.Path -split '\\')[-1])
-            $procs = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq $procName }
-            if ($procs) {
-                $procs | Stop-Process -Force -ErrorAction SilentlyContinue
-                Write-Host "Stopped process: $procName" -ForegroundColor Green
-            } else {
-                Write-Host "No matching process found for: $procName" -ForegroundColor DarkYellow
-            }
+# --- Scheduled Tasks launching explorer.exe ---
+Get-ScheduledTask | ForEach-Object {
+    $_.Actions | Where-Object { $_.Execute -match "explorer.exe" } | ForEach-Object {
+        $found += [PSCustomObject]@{
+            Source  = "Scheduled Task"
+            KeyPath = $_.Execute
+            Name    = $_.TaskName
+            Command = "$($_.Execute) $($_.Arguments)"
         }
     }
 }
 
-Write-Host "`nDone. Only non-Microsoft autoruns were listed." -ForegroundColor Cyan
+# --- Running processes that have spawned explorer.exe ---
+$explorerParents = Get-CimInstance Win32_Process | Where-Object { $_.Name -eq "explorer.exe" }
+foreach ($proc in $explorerParents) {
+    try {
+        $parent = Get-CimInstance Win32_Process -Filter "ProcessId = $($proc.ParentProcessId)"
+        if ($parent.Name -and $parent.Name -ne "System" -and $parent.Name -ne "explorer.exe") {
+            $found += [PSCustomObject]@{
+                Source  = "Active Process"
+                KeyPath = "PID $($parent.ProcessId)"
+                Name    = $parent.Name
+                Command = $parent.CommandLine
+            }
+        }
+    } catch {}
+}
+
+if ($found.Count -eq 0) {
+    Write-Host "No autoruns or processes found that directly launch File Explorer." -ForegroundColor Yellow
+} else {
+    Write-Host "`n=== Potential Triggers Found ===" -ForegroundColor Green
+    $i = 1
+    $found | ForEach-Object {
+        Write-Host "`n[$i]" -ForegroundColor Cyan
+        Write-Host "Source:  $($_.Source)"
+        Write-Host "Name:    $($_.Name)"
+        Write-Host "Command: $($_.Command)"
+        Write-Host "KeyPath: $($_.KeyPath)"
+        $i++
+    }
+}
